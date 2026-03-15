@@ -1,158 +1,186 @@
 "use client";
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../lib/supabase';
-import { X, Save, Loader2, Trash2, Beaker, Package, Search, Plus } from 'lucide-react';
+import { X, Save, Loader2, Trash2, Beaker, Package, Plus } from 'lucide-react';
 
 export default function MaterialUsageModal({ batch, onClose, onSuccess }: any) {
   const [loading, setLoading] = useState(false);
   const [usageList, setUsageList] = useState<any[]>([]);
   const [availableLots, setAvailableLots] = useState<Record<string, any[]>>({});
-  const [searchTerm, setSearchTerm] = useState("");
 
   useEffect(() => {
     const loadData = async () => {
       setLoading(true);
-      // 1. Lấy định mức (BOM) của sản phẩm này để gợi ý sẵn danh sách
-      const { data: bomData } = await supabase
-        .from('product_bom')
-        .select(`material_sku, material_name, unit, type`) // type: 'Material' hoặc 'Packaging'
-        .eq('product_id', batch.product_id);
-      
-      // 2. Lấy tất cả các lô hàng đang còn tồn trong kho
-      const { data: allLots } = await supabase
-        .from('material_lots')
-        .select('*')
-        .gt('remaining_quantity', 0)
-        .in('status', ['Hoàn tất', 'Passed']); // Chỉ lấy hàng đã qua QC
+      try {
+        // 1. Lấy định mức (BOM)
+        const { data: bomData } = await supabase
+          .from('product_bom')
+          .select(`material_sku, material_name, unit, type`)
+          .eq('product_id', batch.product_id);
 
-      // Nhóm lô theo SKU để dễ tra cứu
-      const groupedLots = (allLots || []).reduce((acc: any, lot) => {
-        const sku = lot.material_sku;
-        if (!acc[sku]) acc[sku] = [];
-        acc[sku].push(lot);
-        return acc;
-      }, {});
-      
-      setAvailableLots(groupedLots);
+        // 2. Lấy lô hàng còn tồn (Passed/Hoàn tất)
+        const { data: allLots } = await supabase
+          .from('material_lots')
+          .select('*')
+          .gt('remaining_quantity', 0)
+          .in('status', ['Hoàn tất', 'Passed', 'pass']); // Thêm 'pass' theo logic DB của bạn
 
-      // Khởi tạo danh sách nhập dựa trên BOM
-      if (bomData) {
-        setUsageList(bomData.map(item => ({
-          sku: item.material_sku,
-          name: item.material_name,
-          unit: item.unit,
-          type: item.type,
-          selectedLotId: '',
-          actualQty: '',
-        })));
+        const groupedLots = (allLots || []).reduce((acc: any, lot) => {
+          const sku = lot.material_sku;
+          if (!acc[sku]) acc[sku] = [];
+          acc[sku].push(lot);
+          return acc;
+        }, {});
+        
+        setAvailableLots(groupedLots);
+
+        // 3. Khởi tạo danh sách
+        if (bomData && bomData.length > 0) {
+          setUsageList(bomData.map(item => ({
+            sku: item.material_sku,
+            name: item.material_name,
+            unit: item.unit,
+            type: item.type,
+            selectedLotId: '',
+            actualQty: '',
+            isFromBom: true
+          })));
+        } else {
+          setUsageList([{ sku: '', name: '', unit: '', type: 'Material', selectedLotId: '', actualQty: '', isFromBom: false }]);
+        }
+      } catch (err) {
+        console.error("Lỗi tải dữ vote:", err);
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     };
 
     loadData();
   }, [batch]);
 
   const handleSave = async () => {
-    // Lọc ra các dòng có nhập số lượng và chọn lô
-    const validEntries = usageList.filter(i => i.actualQty > 0 && i.selectedLotId);
-    if (validEntries.length === 0) return alert("Vui lòng nhập số lượng và chọn lô!");
+    const validEntries = usageList.filter(i => parseFloat(i.actualQty) > 0 && i.selectedLotId);
+    if (validEntries.length === 0) return alert("Vui lòng chọn Lô và nhập Số lượng!");
 
     setLoading(true);
     try {
       const insertData = validEntries.map(item => ({
         batch_id: batch.batch_id,
-        material_sku: item.sku,
         material_lot_id: item.selectedLotId,
-        quantity_used: parseFloat(item.actualQty),
-        unit: item.unit,
-        recorded_at: new Date().toISOString()
+        actual_quantity: parseFloat(item.actualQty),
+        unit: item.unit
       }));
 
       const { error } = await supabase.from('batch_material_usage').insert(insertData);
       if (error) throw error;
 
-      alert("Đã lưu dữ liệu nạp vật tư thành công!");
+      alert("Lưu dữ liệu thành công!");
       onSuccess();
       onClose();
     } catch (err: any) {
-      alert("Lỗi: " + err.message);
+      alert(`Lỗi: ${err.message}`);
     } finally {
       setLoading(false);
     }
   };
 
+  const updateRow = (idx: number, fields: any) => {
+    const newList = [...usageList];
+    newList[idx] = { ...newList[idx], ...fields };
+    setUsageList(newList);
+  };
+
   return (
     <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[150] flex items-center justify-center p-4">
-      <div className="bg-white w-full max-w-3xl rounded-[2.5rem] shadow-2xl flex flex-col max-h-[90vh] overflow-hidden">
+      <div className="bg-white w-full max-w-4xl rounded-[2.5rem] shadow-2xl flex flex-col max-h-[90vh] overflow-hidden">
         
         {/* Header */}
         <div className="p-6 bg-amber-50 border-b flex justify-between items-center">
           <div className="flex items-center gap-3">
-            <div className="p-3 bg-amber-500 text-white rounded-2xl shadow-lg shadow-amber-100">
+            <div className="p-3 bg-amber-500 text-white rounded-2xl shadow-lg">
               <Beaker size={20} />
             </div>
             <div>
-              <h3 className="font-black text-xs uppercase text-amber-600 tracking-widest">Nạp nguyên liệu & Bao bì</h3>
+              <h3 className="font-black text-[10px] uppercase text-amber-600 tracking-widest">Nạp nguyên liệu & Bao bì</h3>
               <p className="font-black text-slate-800 uppercase italic leading-none">{batch.batch_id}</p>
             </div>
           </div>
-          <button onClick={onClose} className="p-2 hover:bg-white rounded-full transition-all"><X size={20}/></button>
+          <button onClick={onClose} className="p-2 hover:bg-white rounded-full text-slate-400"><X size={20}/></button>
         </div>
 
-        {/* Nội dung nhập liệu */}
-        <div className="flex-1 overflow-y-auto p-8 space-y-6">
-          {usageList.length === 0 && !loading && (
-            <div className="text-center py-10 text-slate-400 font-bold uppercase text-[10px]">Chưa có định mức cho sản phẩm này</div>
-          )}
-
+        {/* Form Content */}
+        <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {usageList.map((item, idx) => (
-            <div key={idx} className="group relative bg-slate-50 hover:bg-white border border-slate-100 hover:border-amber-200 rounded-[2rem] p-5 transition-all flex flex-wrap md:flex-nowrap items-center gap-4">
+            <div key={idx} className="group relative bg-slate-50 hover:bg-white border border-slate-100 hover:border-amber-200 rounded-[1.5rem] p-4 transition-all flex flex-wrap md:flex-nowrap items-center gap-4">
               
-              {/* Icon phân loại */}
-              <div className={`p-3 rounded-2xl ${item.type === 'Packaging' ? 'bg-blue-50 text-blue-500' : 'bg-emerald-50 text-emerald-500'}`}>
-                {item.type === 'Packaging' ? <Package size={18}/> : <Beaker size={18}/>}
+              {/* Material Info - ĐÃ SỬA ĐỂ HIỆN TÊN */}
+              <div className="flex items-center gap-3 w-full md:w-2/5">
+                <div className={`p-2.5 rounded-xl flex-shrink-0 ${item.type === 'Packaging' ? 'bg-blue-100 text-blue-600' : 'bg-emerald-100 text-emerald-600'}`}>
+                  {item.type === 'Packaging' ? <Package size={16}/> : <Beaker size={16}/>}
+                </div>
+                <div className="flex-1 overflow-hidden">
+                  {item.isFromBom ? (
+                    <>
+                      <p className="text-[9px] font-black text-slate-400 uppercase leading-none">{item.sku}</p>
+                      <p className="text-[11px] font-bold text-slate-700 uppercase line-clamp-1">{item.name}</p>
+                    </>
+                  ) : (
+                    <div className="flex flex-col gap-1">
+                      <p className="text-[8px] font-black text-amber-600 uppercase">Chọn vật tư ngoài định mức:</p>
+                      <select 
+                        className="w-full bg-transparent border-b-2 border-slate-200 text-[11px] font-bold outline-none focus:border-amber-500 pb-1 cursor-pointer text-slate-700 uppercase"
+                        value={item.sku}
+                        onChange={(e) => {
+                          const selectedSku = e.target.value;
+                          const lots = availableLots[selectedSku] || [];
+                          const materialName = lots[0]?.material_name || 'Vật tư không tên';
+                          updateRow(idx, { 
+                            sku: selectedSku, 
+                            unit: lots[0]?.unit || 'Kg', 
+                            name: materialName,
+                            type: lots[0]?.type || 'Material'
+                          });
+                        }}
+                      >
+                        <option value="">-- Click để chọn tên vật tư --</option>
+                        {Object.entries(availableLots).map(([sku, lots]) => (
+                          <option key={sku} value={sku}>
+                            {lots[0]?.material_name || sku} ({sku})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
               </div>
 
-              {/* Thông tin vật tư */}
-              <div className="flex-1 min-w-[150px]">
-                <p className="text-[10px] font-black text-slate-400 uppercase leading-none mb-1">{item.sku}</p>
-                <p className="text-xs font-black text-slate-800 uppercase leading-tight">{item.name}</p>
-              </div>
-
-              {/* Chọn Lô từ kho */}
-              <div className="w-full md:w-48">
-                <p className="text-[8px] font-black text-slate-400 uppercase mb-1 ml-1">Chọn Lô tồn kho</p>
+              {/* Lot Selection */}
+              <div className="flex-1 min-w-[140px]">
+                <p className="text-[8px] font-black text-slate-400 uppercase mb-1 ml-1">Lô tồn kho</p>
                 <select 
-                  className="w-full p-2.5 bg-white border border-slate-200 rounded-xl text-[10px] font-bold outline-none focus:ring-2 focus:ring-amber-500 transition-all"
+                  className="w-full p-2.5 bg-white border border-slate-200 rounded-xl text-[10px] font-bold outline-none focus:ring-2 focus:ring-amber-500"
                   value={item.selectedLotId}
-                  onChange={(e) => {
-                    const newList = [...usageList];
-                    newList[idx].selectedLotId = e.target.value;
-                    setUsageList(newList);
-                  }}
+                  disabled={!item.sku}
+                  onChange={(e) => updateRow(idx, { selectedLotId: e.target.value })}
                 >
-                  <option value="">-- Chọn Lot --</option>
+                  <option value="">Chọn Lot...</option>
                   {(availableLots[item.sku] || []).map(lot => (
                     <option key={lot.id} value={lot.id}>
-                      {lot.lot_number} (Tồn: {lot.remaining_quantity} {item.unit})
+                      {lot.lot_number} - Còn: {lot.remaining_quantity} {lot.unit}
                     </option>
                   ))}
                 </select>
               </div>
 
-              {/* Nhập số lượng */}
-              <div className="w-full md:w-32">
-                <p className="text-[8px] font-black text-slate-400 uppercase mb-1 ml-1">Số lượng ({item.unit})</p>
+              {/* Quantity Input */}
+              <div className="w-24 md:w-32">
+                <p className="text-[8px] font-black text-slate-400 uppercase mb-1 ml-1">Số lượng ({item.unit || '...'})</p>
                 <input 
                   type="number"
                   placeholder="0.00"
-                  className="w-full p-2.5 bg-white border border-slate-200 rounded-xl text-xs font-black outline-none focus:ring-2 focus:ring-amber-500 transition-all"
+                  className="w-full p-2.5 bg-white border border-slate-200 rounded-xl text-[11px] font-black outline-none focus:ring-2 focus:ring-amber-500"
                   value={item.actualQty}
-                  onChange={(e) => {
-                    const newList = [...usageList];
-                    newList[idx].actualQty = e.target.value;
-                    setUsageList(newList);
-                  }}
+                  onChange={(e) => updateRow(idx, { actualQty: e.target.value })}
                 />
               </div>
 
@@ -166,20 +194,20 @@ export default function MaterialUsageModal({ batch, onClose, onSuccess }: any) {
           ))}
 
           <button 
-            onClick={() => setUsageList([...usageList, { sku: '', name: 'Vật tư ngoài định mức', unit: 'Kg', type: 'Material', selectedLotId: '', actualQty: '' }])}
-            className="w-full py-4 border-2 border-dashed border-slate-200 rounded-[2rem] text-[10px] font-black text-slate-400 uppercase hover:bg-slate-50 transition-all"
+            onClick={() => setUsageList([...usageList, { sku: '', name: '', unit: '', type: 'Material', selectedLotId: '', actualQty: '', isFromBom: false }])}
+            className="w-full py-4 border-2 border-dashed border-slate-200 rounded-2xl text-[10px] font-black text-slate-400 uppercase hover:bg-slate-50 hover:border-amber-300 hover:text-amber-600 transition-all flex items-center justify-center gap-2"
           >
-            + Thêm vật tư khác
+            <Plus size={14}/> Thêm nguyên liệu ngoài định mức
           </button>
         </div>
 
         {/* Footer */}
-        <div className="p-8 border-t bg-slate-50 flex gap-4">
-          <button onClick={onClose} className="flex-1 py-4 text-[10px] font-black uppercase text-slate-400 hover:text-slate-600">Hủy</button>
+        <div className="p-6 border-t bg-slate-50 flex gap-4">
+          <button onClick={onClose} className="flex-1 py-4 text-[10px] font-black uppercase text-slate-400">Hủy bỏ</button>
           <button 
             disabled={loading}
             onClick={handleSave}
-            className="flex-[2] bg-amber-600 text-white py-4 rounded-2xl font-black text-xs uppercase shadow-xl shadow-amber-100 active:scale-95 disabled:opacity-50 flex items-center justify-center gap-2"
+            className="flex-[2] bg-amber-600 text-white py-4 rounded-2xl font-black text-xs uppercase shadow-xl active:scale-[0.97] disabled:opacity-50 flex items-center justify-center gap-2"
           >
             {loading ? <Loader2 size={18} className="animate-spin" /> : <Save size={18} />}
             Xác nhận nạp & Trừ kho

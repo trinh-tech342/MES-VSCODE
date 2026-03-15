@@ -8,7 +8,6 @@ import PQCManager from './PQCManager';
 import OQCManager from './OQCManager';
 import QCDetailPanel from './QCDetailPanel'; 
 
-
 export default function QCTab() {
   const [activeSubTab, setActiveSubTab] = useState<'IQC' | 'PQC' | 'OQC'>('IQC');
   const [qcLots, setQcLots] = useState<any[]>([]);
@@ -19,8 +18,8 @@ export default function QCTab() {
   const [isUpdating, setIsUpdating] = useState(false);
 
   /**
-   * 1. HÀM LẤY DỮ LIỆU TỔNG HỢP
-   * Đã sửa lỗi: Cột 'name' thay cho 'material_name' theo đúng schema material_catalog
+   * 1. HÀM LẤY DỮ LIỆU TỔNG HỢP (onRefresh)
+   * Sử dụng useCallback để hàm không bị định nghĩa lại mỗi lần render
    */
   const fetchQCData = useCallback(async () => {
     setLoading(true);
@@ -29,10 +28,9 @@ export default function QCTab() {
       let error: any = null;
 
       if (activeSubTab === 'IQC') {
-        // IQC: Lấy từ lô nguyên liệu nhập kho
         const { data, error: iqcError } = await supabase
           .from('material_lots')
-          .select('*') // Đơn giản là lấy tất cả các cột
+          .select('*') 
           .order('import_date', { ascending: false })
           .limit(100);
         
@@ -40,15 +38,11 @@ export default function QCTab() {
         error = iqcError;
       } 
       else if (activeSubTab === 'OQC') {
-        // OQC: Lấy từ lệnh sản xuất, join với catalog để lấy tên sản phẩm
         const { data, error: oqcError } = await supabase
           .from('batch_records')
           .select(`
             *,
-            material_catalog!fk_batch_sku_catalog (
-              name,
-              sku
-            )
+            material_catalog!fk_batch_sku_catalog (name, sku)
           `)
           .order('created_at', { ascending: false });
         
@@ -56,34 +50,24 @@ export default function QCTab() {
         error = oqcError;
       }
 
-      if (error) {
-        // Log chi tiết để tránh lỗi hiển thị "{}"
-        console.error("Supabase Error Details:", {
-          message: error.message,
-          details: error.details,
-          hint: error.hint
-        });
-        throw error;
-      }
+      if (error) throw error;
 
-      // 2. MAPPING DỮ LIỆU ĐỂ ĐỒNG BỘ GIAO DIỆN
       const formatted = rawData.map(item => {
         if (activeSubTab === 'OQC') {
           return {
             id: item.id,
             lot_id: item.batch_number || 'N/A',
             sku: item.sku || 'N/A',
-            // Sử dụng item.material_catalog.name theo đúng schema SQL
             product_name: item.material_catalog?.name || 'Thành phẩm chưa rõ tên',
             output_qty: Number(item.output_qty || 0),
             unit: item.unit || 'Sp',
-            status: item.qc_status, 
+            status: item.qc_status === 'Passed' ? true : (item.qc_status === 'Failed' ? false : null), 
             date: item.created_at,
+            evidence_url: item.evidence_url,
             notes: item.notes || "",
             raw: item 
           };
         } else {
-          // Mapping cho IQC
           return {
             id: item.id,
             lot_id: item.lot_number || 'N/A',
@@ -92,8 +76,9 @@ export default function QCTab() {
             supplier_name: item.supplier_name || 'Không có NCC',
             output_qty: Number(item.remaining_quantity || 0),
             unit: item.unit || 'Kg',
-            status: item.status, 
+            status: item.status === 'Passed' ? true : (item.status === 'Pending' ? null : false),
             date: item.import_date,
+            evidence_url: item.evidence_url,
             notes: item.notes || "",
             raw: item
           };
@@ -101,49 +86,99 @@ export default function QCTab() {
       });
       
       setQcLots(formatted);
+      
+      // Cập nhật viewingLot nếu đang mở
+      if (viewingLot) {
+        const updatedViewing = formatted.find(f => f.id === viewingLot.id);
+        if (updatedViewing) setViewingLot(updatedViewing);
+      }
     } catch (err: any) {
-      console.error("Lỗi hệ thống QC:", err.message || err);
+      console.error("Lỗi hệ thống QC:", err.message);
     } finally { 
       setLoading(false); 
     }
-  }, [activeSubTab]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSubTab, viewingLot?.id]); 
 
+  /**
+   * 2. EFFECT: FETCH DỮ LIỆU KHI TAB THAY ĐỔI
+   * Mảng dependency [activeSubTab, fetchQCData] luôn có 2 phần tử
+   */
   useEffect(() => { 
     setSearchTerm("");
     fetchQCData(); 
-  }, [fetchQCData]);
+  }, [activeSubTab, fetchQCData]);
 
   /**
-   * 3. XỬ LÝ CẬP NHẬT TRẠNG THÁI (PASSED/FAILED)
+   * 3. XỬ LÝ CẬP NHẬT TRẠNG THÁI
    */
-  const handleUpdateStatus = async (newStatus: boolean) => {
-    if (!viewingLot) return;
-    setIsUpdating(true);
-    try {
-      const isIQC = activeSubTab === 'IQC';
-      const tableName = isIQC ? 'material_lots' : 'batch_records';
-      const statusValue = newStatus ? 'Passed' : 'Failed';
-      
-      const updateData = isIQC 
-        ? { status: statusValue }
-        : { qc_status: statusValue };
+ const handleUpdateStatus = async (newStatus: boolean | null, updatedUrl?: string) => {
+  if (!viewingLot) return;
+  setIsUpdating(true);
 
-      const { error } = await supabase
-        .from(tableName)
-        .update(updateData)
-        .eq('id', viewingLot.id);
+  try {
+    const isIQC = activeSubTab === 'IQC';
+    const tableName = isIQC ? 'material_lots' : 'batch_records';
+    
+    // 1. Chuẩn bị giá trị trạng thái cho bảng nghiệp vụ (String: Passed/Failed)
+    let statusText = viewingLot.raw.status || viewingLot.raw.qc_status;
+    if (newStatus === true) statusText = 'Passed';
+    if (newStatus === false) statusText = 'Failed';
 
-      if (error) throw error;
+    const updateBusinessData: any = isIQC 
+      ? { status: statusText }
+      : { qc_status: statusText };
+
+    // 2. CẬP NHẬT BẢNG NGHIỆP VỤ (Bảng chính để chạy kho/sản xuất)
+    const { error: bizError } = await supabase
+      .from(tableName)
+      .update(updateBusinessData)
+      .eq('id', viewingLot.id);
+
+    if (bizError) throw bizError;
+
+    // 3. CẬP NHẬT BẢNG QC_LOGS (Bảng nhật ký kiểm định)
+    // Lưu ý: viewingLot.qc_log_id phải là ID của dòng tương ứng trong bảng qc_logs
+    if (viewingLot.qc_log_id) {
+      const qcLogUpdate: any = {
+        updated_at: new Date().toISOString(),
+      };
       
-      await fetchQCData(); 
+      // Chỉ cập nhật status nếu người dùng nhấn nút Duyệt/Từ chối (newStatus !== null)
+      if (newStatus !== null) {
+        qcLogUpdate.status = newStatus; 
+      }
+      
+      // Cập nhật ảnh nếu có
+      if (updatedUrl) {
+        qcLogUpdate.evidence_url = updatedUrl;
+      }
+
+      const { error: logError } = await supabase
+        .from('qc_logs')
+        .update(qcLogUpdate)
+        .eq('id', viewingLot.qc_log_id);
+
+      if (logError) console.error("Lưu log thất bại nhưng nghiệp vụ đã xong:", logError);
+    }
+
+    // 4. LÀM MỚI UI VÀ ĐÓNG PANEL
+    await fetchQCData(); 
+
+    if (newStatus !== null) {
+      alert(newStatus ? "✅ Phê duyệt thành công!" : "❌ Đã từ chối lô hàng!");
       setIsSidePanelOpen(false);
       setViewingLot(null);
-    } catch (e: any) {
-      alert("Lỗi cập nhật QC: " + (e.message || "Lỗi không xác định"));
-    } finally {
-      setIsUpdating(false);
+    } else if (updatedUrl) {
+      alert("📸 Đã cập nhật hình ảnh minh chứng!");
     }
-  };
+
+  } catch (e: any) {
+    alert("Lỗi hệ thống QC: " + (e.message || "Lỗi không xác định"));
+  } finally {
+    setIsUpdating(false);
+  }
+};
 
   return (
     <div className="relative min-h-screen bg-slate-50/50 -m-6 p-6 overflow-hidden">
@@ -157,8 +192,8 @@ export default function QCTab() {
                 <ShieldCheck size={24} />
               </div>
               <div>
-                <h2 className="text-xl font-black text-slate-800 uppercase tracking-tighter italic">Hệ thống Kiểm soát Chất lượng</h2>
-                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Real-time Quality Management System</p>
+                <h2 className="text-xl font-black text-slate-800 uppercase tracking-tighter italic">Quản lý Chất lượng</h2>
+                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Hệ thống giám sát IQC/PQC/OQC</p>
               </div>
             </div>
             
@@ -190,8 +225,7 @@ export default function QCTab() {
                 searchTerm={searchTerm} 
                 setSearchTerm={setSearchTerm} 
                 onOpenDetail={(lot: any) => { setViewingLot(lot); setIsSidePanelOpen(true); }}
-                viewingLotId={viewingLot?.id}
-                isSidePanelOpen={isSidePanelOpen}
+                onRefresh={fetchQCData}
               />
             )}
             
@@ -201,8 +235,8 @@ export default function QCTab() {
                 loading={loading} 
                 searchTerm={searchTerm} 
                 setSearchTerm={setSearchTerm}
+                onRefresh={fetchQCData} 
                 onOpenDetail={(lot: any) => { setViewingLot(lot); setIsSidePanelOpen(true); }}
-                onRefresh={fetchQCData}
               />
             )}
 
@@ -211,7 +245,7 @@ export default function QCTab() {
         </div>
       </div>
       
-      {/* SIDE PANEL CHI TIẾT QC */}
+      {/* SIDE PANEL */}
       {(activeSubTab === 'IQC' || activeSubTab === 'OQC') && (
         <QCDetailPanel 
           isOpen={isSidePanelOpen}
@@ -226,9 +260,9 @@ export default function QCTab() {
         />
       )}
 
-      {/* OVERLAY LOADING TOÀN TRANG */}
-      {loading && (
-        <div className="absolute inset-0 bg-white/50 backdrop-blur-[2px] z-10 flex items-center justify-center">
+      {/* OVERLAY LOADING */}
+      {loading && !qcLots.length && (
+        <div className="absolute inset-0 bg-white/50 backdrop-blur-[2px] z-[100] flex items-center justify-center">
            <Loader2 className="animate-spin text-indigo-600" size={40} />
         </div>
       )}

@@ -9,9 +9,8 @@ export default function OrderList() {
   const [processingId, setProcessingId] = useState<string | null>(null);
   const [filter, setFilter] = useState('WAITING');
 
-  // --- 1. HÀM LẤY DỮ LIỆU (Dùng useCallback để ổn định dependency) ---
+  // --- 1. HÀM LẤY DỮ LIỆU BAN ĐẦU ---
   const fetchOrderItems = useCallback(async () => {
-    // Chỉ hiện loading xoay ở lần đầu, các lần realtime sau sẽ cập nhật ngầm cho mượt
     try {
       const { data, error } = await supabase
         .from('order_items') 
@@ -41,9 +40,9 @@ export default function OrderList() {
     }
   }, []);
 
-  // --- 2. THIẾT LẬP REALTIME ---
+  // --- 2. THIẾT LẬP REALTIME TỐI ƯU ---
   useEffect(() => {
-    fetchOrderItems(); // Lấy dữ liệu lần đầu
+    fetchOrderItems(); 
 
     const channel = supabase
       .channel('order-items-realtime')
@@ -51,23 +50,34 @@ export default function OrderList() {
         'postgres_changes', 
         { event: '*', schema: 'public', table: 'order_items' }, 
         (payload) => {
-          console.log("Phát hiện thay đổi đơn hàng:", payload);
-          fetchOrderItems(); // Tự động cập nhật lại danh sách
+          if (payload.eventType === 'UPDATE') {
+            // Cập nhật cục bộ: Giữ dữ liệu quan hệ (orders) và đè dữ liệu mới
+            setItems(prev => prev.map(item => 
+              item.id === payload.new.id 
+                ? { ...item, ...payload.new } 
+                : item
+            ));
+          } else {
+            fetchOrderItems();
+          }
         }
       )
       .subscribe();
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    return () => { supabase.removeChannel(channel); };
   }, [fetchOrderItems]);
 
-  // --- 3. LOGIC DUYỆT SẢN XUẤT ---
+  // --- 3. LOGIC DUYỆT SẢN XUẤT (SỬ DỤNG RPC) ---
   const approveItemProduction = async (item: any) => {
+    // Chặn ngay lập tức nếu đang xử lý hoặc đơn đã đổi trạng thái
+    if (processingId || getStatusType(item.status) !== 'WAITING') return;
+    
     if (!window.confirm(`Xác nhận duyệt SKU: ${item.sku}?`)) return;
+    
     setProcessingId(item.id);
 
     try {
+      // BƯỚC 1: Lấy quy trình từ bảng product_process
       const { data: processData, error: processError } = await supabase
         .from('product_process')
         .select('steps')
@@ -76,51 +86,38 @@ export default function OrderList() {
 
       if (processError || !processData) throw new Error(`SKU ${item.sku} chưa có quy trình!`);
 
-      const newBatchId = `BT-${item.sku}-${Date.now().toString().slice(-4)}`;
+      // BƯỚC 2: Gọi Database Function (RPC) - Xử lý tất cả các bảng trong 1 Transaction
+      const { error: rpcError } = await supabase.rpc('approve_production_v1', {
+        p_item_id: item.id,
+        p_sku: item.sku,
+        p_order_id: item.order_id,
+        p_quantity: item.quantity,
+        p_steps: processData.steps 
+      });
 
-      // Cập nhật trạng thái item
-      const { error: updateError } = await supabase
-        .from('order_items')
-        .update({ status: 'Đang sản xuất' })
-        .eq('id', item.id);
-      
-      if (updateError) throw updateError;
+      if (rpcError) {
+        // Kiểm tra lỗi tùy chỉnh từ SQL (nếu đơn đã được duyệt trước đó)
+        if (rpcError.message.includes('already in production')) {
+          throw new Error("Đơn hàng này đã được người khác duyệt rồi!");
+        }
+        throw rpcError;
+      }
 
-      // Tạo Lô sản xuất (Batch)
-      await supabase.from('batches').insert([{
-        batch_id: newBatchId,
-        sku: item.sku,
-        order_id: item.order_id,
-        order_item_id: item.id,
-        planned_qty: item.quantity,
-        status: 'RUNNING',
-        start_time: new Date().toISOString()
-      }]);
-
-      // Tạo các công đoạn (Steps)
-      const stepsToInsert = processData.steps.map((name: string, index: number) => ({
-        batch_id: newBatchId,
-        step_name: name,
-        status: 'PENDING',
-        sort_order: index,
-        operator_name: 'Hệ thống'
-      }));
-
-      await supabase.from('production_steps').insert(stepsToInsert);
-      
-      // Không cần fetchOrderItems() ở đây nữa vì Realtime sẽ tự bắt được event Update phía trên
+      // THÀNH CÔNG: UI sẽ tự cập nhật nhờ Realtime Update ở bước 2
     } catch (error: any) {
-      alert("Lỗi: " + error.message);
+      alert("Thông báo: " + error.message);
+      fetchOrderItems(); // Đồng bộ lại danh sách để chắc chắn dữ liệu khớp
     } finally {
       setProcessingId(null);
     }
   };
 
+  // --- 4. HELPER PHÂN LOẠI TRẠNG THÁI ---
   const getStatusType = (rawStatus: string) => {
     const s = (rawStatus || '').toUpperCase();
     if (s.includes('CHỜ') || s === 'WAITING' || s === '') return 'WAITING';
     if (s.includes('ĐANG') || s === 'RUNNING' || s === 'IN_PROGRESS') return 'RUNNING';
-    if (s.includes('HOÀN THÀNH') || s === 'FINISHED' || s === 'COMPLETED') return 'FINISHED';
+    if (s.includes('HOÀN THÀNH') || s === 'FINISHED' || s === 'COMPLETED') return 'COMPLETED';
     return 'OTHER';
   };
 
@@ -148,7 +145,7 @@ export default function OrderList() {
           {[
             { id: 'WAITING', label: 'Chờ duyệt' },
             { id: 'RUNNING', label: 'Sản xuất' },
-            { id: 'FINISHED', label: 'Hoàn thành' },
+            { id: 'COMPLETED', label: 'Hoàn thành' },
             { id: 'ALL', label: 'Tất cả' }
           ].map((tab) => (
             <button
@@ -178,6 +175,8 @@ export default function OrderList() {
           <tbody className="divide-y divide-slate-100">
             {filteredItems.map((item) => {
               const statusType = getStatusType(item.status);
+              const isProcessing = processingId === item.id;
+
               return (
                 <tr key={item.id} className="hover:bg-slate-50/80 transition-all group">
                   <td className="p-5">
@@ -201,7 +200,7 @@ export default function OrderList() {
                   <td className="p-5 text-center">
                     <span className={`px-3 py-1 rounded-full text-[9px] font-black uppercase border ${
                       statusType === 'RUNNING' ? 'bg-orange-50 text-orange-600 border-orange-100 animate-pulse' : 
-                      statusType === 'FINISHED' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 
+                      statusType === 'COMPLETED' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 
                       'bg-slate-100 text-slate-400 border-slate-200'
                     }`}>
                       {item.status || 'Chờ duyệt'}
@@ -212,10 +211,10 @@ export default function OrderList() {
                     {statusType === 'WAITING' ? (
                       <button 
                         onClick={() => approveItemProduction(item)}
-                        disabled={processingId === item.id}
-                        className="px-4 py-2 bg-blue-600 text-white rounded-xl text-[10px] font-black hover:bg-blue-700 uppercase flex items-center gap-2 ml-auto shadow-lg shadow-blue-100 active:scale-95 transition-all disabled:opacity-50"
+                        disabled={isProcessing || !!processingId}
+                        className="px-4 py-2 bg-blue-600 text-white rounded-xl text-[10px] font-black hover:bg-blue-700 uppercase flex items-center gap-2 ml-auto shadow-lg shadow-blue-100 active:scale-95 transition-all disabled:opacity-50 disabled:grayscale"
                       >
-                        {processingId === item.id ? <Loader2 size={12} className="animate-spin"/> : 'Duyệt sản xuất'}
+                        {isProcessing ? <Loader2 size={12} className="animate-spin"/> : 'Duyệt sản xuất'}
                       </button>
                     ) : (
                       <div className="flex justify-end items-center gap-1 text-[10px] font-bold text-slate-300 italic uppercase">
@@ -228,14 +227,6 @@ export default function OrderList() {
             })}
           </tbody>
         </table>
-        
-        {filteredItems.length === 0 && (
-          <div className="p-20 text-center">
-            <p className="text-slate-300 font-bold uppercase text-[10px] tracking-widest italic">
-              Không có đơn hàng nào trong mục này
-            </p>
-          </div>
-        )}
       </div>
     </div>
   );

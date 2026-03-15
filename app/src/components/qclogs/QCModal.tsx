@@ -28,7 +28,7 @@ export default function QCModal({ batch, step, onClose, onSuccess }: any) {
       const { error: logError } = await supabase.from('qc_logs').insert([{ 
         batch_id: batch.id, 
         lot_number: batch.batch_id, 
-        type: 'PRODUCTION', 
+        type: 'PQC', 
         metrics: metricValues, 
         status: isPassed, 
         product_id: batch.product_id 
