@@ -149,7 +149,7 @@ const handleBulkSubmit = async () => {
     const { error } = await supabase.from('material_lots').insert(finalData);
 
     if (!error) {
-        alert("🚀 Thành công: Dữ liệu đã được lưu!");
+        alert("🚀 Thành công: Dữ liệu đã được lưu, VUI LÒNG CHỜ XÁC NHẬN CỦA QC!");
         setRows([initialRow()]);
         onSuccess();
         onClose();
