@@ -288,7 +288,7 @@ export default function WarehouseTab() {
                         </td>
                         <td className="px-8 py-5 text-center">
                           <span className="text-lg font-black text-slate-900">{item.qty.toLocaleString()}</span>
-                          <span className="text-[9px] text-slate-400 uppercase font-black ml-1.5">{item.unit}</span>
+                          <span className="text-[9px] text-slate-400 uppercase font-black ml-1.5">{SP}</span>
                         </td>
                         <td className="px-8 py-5">
                           <div className={`flex items-center gap-3 p-3 rounded-2xl border ${item.daysUntilOrder <= 0 ? 'bg-rose-50 border-rose-100' : 'bg-slate-50 border-slate-100'}`}>
